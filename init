@@ -56,14 +56,14 @@ if [ -x /bin/magisk.sh ]; then
 fi
 
 # --- chainload original initrd ---
-# Unpack /initrd_real.img into /real, then switch_root to it
+# Unpack /initrd.img into /real, then switch_root to it
 REAL=/real
 mkdir -p "$REAL"
-if [ -f /initrd_real.img ]; then
-  ( cd "$REAL" && gzip -dc /initrd_real.img | cpio -idmv ) || {
-    echo "failed to unpack initrd_real.img"; exec sh; }
+if [ -f /initrd.img ]; then
+  ( cd "$REAL" && gzip -dc /initrd.img | cpio -idmv ) || {
+    echo "failed to unpack initrd.img"; exec sh; }
 else
-  echo "initrd_real.img missing"; exec sh
+  echo "initrd.img missing"; exec sh
 fi
 
 # Move our mounts over so /init can see devices and proc/sys
