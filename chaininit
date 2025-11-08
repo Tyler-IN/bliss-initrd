@@ -1,0 +1,130 @@
+#!/bin/busybox sh
+# /chaininit
+
+# expects /init to exec /chaininit
+# expects boot device to contain initrd_real.img and magisk.apk
+# can't toggle selinux this early, missing from sys
+
+set -eux
+exec >/dev/kmsg 2>&1
+echo "/chaininit running..."
+
+export PATH=/sbin:/bin
+/bin/busybox --install -s /bin
+
+# basic mounts
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs devtmpfs /dev
+
+mount_boot_device() {
+  target="$1"
+  mp="$2"
+
+  [ -d "$mp" ] || mkdir -p "$mp"
+
+  for pair in $(blkid | sed -n 's#^\(/dev/[^:]*\):.*TYPE="\([^"]*\)".*#\1:\2#p'); do
+    dev="${pair%%:*}"
+    fstype="${pair##*:}"
+
+    case "$fstype" in
+      ext4|ext3|ext2|f2fs|xfs|btrfs) : ;;
+      *) continue ;;
+    esac
+
+    if mount -o ro -t "$fstype" "$dev" "$mp"; then
+      if [ -e "$mp$target" ]; then
+        echo "$dev"
+        return 0
+      fi
+      umount "$mp" || { echo "umount $mp failed"; exec sh; }
+    fi
+  done
+
+  return 1
+}
+
+# locate boot device from boot image from kernel command line
+
+BOOT_IMAGE="$(sed -n 's/.*BOOT_IMAGE=\([^ ]*\).*/\1/p' /proc/cmdline)"
+
+[ -n "$BOOT_IMAGE" ] || { echo "boot image missing from command line"; exec sh; }
+
+echo "BOOT_IMAGE=$BOOT_IMAGE"
+
+BOOT_DIR="${BOOT_IMAGE%/*}"
+
+[ -n "$BOOT_DIR" ] || { echo "failed to parse BOOT_DIR from $BOOT_IMAGE"; exec sh; }
+
+echo "BOOT_DIR=$BOOT_DIR"
+
+mkdir -p /boot
+
+BOOT_DEV=$(mount_boot_device "$BOOT_IMAGE" /boot)
+
+[ -n "$BOOT_DEV" ] || { echo "mount point for boot image not found"; exec sh; }
+
+echo "BOOT_DEV=$BOOT_DEV"
+
+INITRD_REAL="/boot$BOOT_DIR/initrd_real.img"
+
+[ -f "$INITRD_REAL" ] || { echo "$INITRD_REAL missing"; exec sh; }
+
+echo "INITRD_REAL=$INITRD_REAL"
+
+# remove the stub /init script
+rm -f /init
+
+# unpack the original ramdisk, deliberately overwrite files in / with the real initrd's files; no switch_root
+
+( cd / && gzip -dc "$INITRD_REAL" | cpio -idmu ) || { echo "unpack failed"; exec sh; }
+
+# stage Magisk into the NEW root (x86_64)
+
+MAGISK_APK="/boot$BOOT_DIR/magisk.apk"
+
+[ -f "$MAGISK_APK" ] || { echo "$MAGISK_APK missing"; exec sh; }
+
+echo "MAGISK_APK=$MAGISK_APK"
+
+# create /magisk, /tmp and /tmp/magiskstage (-p)
+mkdir -p /magisk /tmp/magiskstage
+
+# extract x86_64 libs from the APK
+unzip -o "$MAGISK_APK" "lib/x86_64/*" -d /tmp/magiskstage || { echo "failed to extract libs from $MAGISK_APK"; exec sh; }
+
+[ "$(ls -A /tmp/magiskstage/lib/x86_64 2>/dev/null)" ] || { echo "missing (/tmp/magiskstage)/lib/x86_64/*"; exec sh; }
+
+cp -af "/tmp/magiskstage/lib/x86_64/"* /magisk
+
+# rename shared objects to the filenames Magisk expects
+for f in magisk magisk64 magiskinit magiskpolicy magiskboot busybox; do
+  [ -f "/magisk/lib${f}.so" ] && { cp -f "/magisk/lib${f}.so" "/magisk/$f"; chmod 0755 "/magisk/$f"; }
+done
+
+# ensure /magisk/magisk exists (copy or symlink to magisk64)
+if [ -x /magisk/magisk64 ]; then
+  cp -f /magisk/magisk64 /magisk/magisk
+  chmod 0755 /magisk/magisk
+fi
+
+# pull useful assets (names vary a bit by version)
+unzip -o "$MAGISK_APK" 'assets/*' -x 'assets/chromeos/*' -d /magisk || { echo "failed to extract assets from $MAGISK_APK"; exec sh; }
+
+chmod -R a+rX /magisk
+
+[ -x /scripts/99_magisk ] || chmod 0755 /scripts/99_magisk
+
+/scripts/99_magisk
+
+umount /boot || { echo "umount /boot failed"; exec sh; }
+
+
+[ -f /init ] || { echo "/init missing"; exec sh; }
+
+[ -x /init ] || chmod 0755 /init
+
+echo "/chaininit executing /init..."
+
+# replaces PID 1 with the real init
+exec /init

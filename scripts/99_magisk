@@ -1,0 +1,47 @@
+#!/bin/busybox sh
+# /scripts/99_magisk
+set -eux
+exec >/dev/kmsg 2>&1
+echo "/scripts/99_magisk running..."
+
+# Require core bits staged by /chaininit
+[ -x /magisk/magisk ] || { echo "/magisk/magisk missing"; exit 1; }
+
+# Create a small Magisk rc that defers to magiskinit
+# (names vary across versions; this works on Android-x86/Bliss)
+cat > /magisk/init.magisk.rc <<'EOF'
+on early-init
+    exec -- /bin/sh -c 'echo magisk-rc: early-init >/dev/kmsg'
+
+on post-fs-data
+    exec -- /bin/sh -c 'echo magisk-rc: post-fs-data >/dev/kmsg'
+    exec -- /magisk/magisk --post-fs-data
+
+service magisk_service /magisk/magisk --service
+    class late_start
+    user root
+    oneshot
+EOF
+chmod 0644 /magisk/init.magisk.rc
+
+# Ensure Android init will parse it.
+# If the ramdisk has no rc at all, seed a minimal /init.rc that imports platform rc sets.
+if [ ! -f /init.rc ]; then
+  cat > /init.rc <<'EOF'
+import /magisk/init.magisk.rc
+import /system/etc/init/hw/init.rc
+import /system/etc/init/init.rc
+import /vendor/etc/init/hw/init.rc
+import /vendor/etc/init/init.rc
+import /odm/etc/init/hw/init.rc
+import /odm/etc/init/init.rc
+import /product/etc/init/hw/init.rc
+import /product/etc/init/init.rc
+EOF
+  chmod 0644 /init.rc
+else
+  grep -q '^[[:space:]]*import[[:space:]]\+/magisk/init\.magisk\.rc' /init.rc \
+    || printf '\nimport /magisk/init.magisk.rc\n' >> /init.rc
+fi
+
+echo "/scripts/99_magisk exiting..."
