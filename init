@@ -55,22 +55,28 @@ if [ -x /bin/magisk.sh ]; then
   /bin/magisk.sh || echo "magisk.sh returned nonzero, continuing"
 fi
 
-# --- chainload original initrd ---
-# Unpack /initrd.img into /real, then switch_root to it
+# --- chainload original initrd (robust, no move) ---
 REAL=/real
 mkdir -p "$REAL"
-if [ -f /initrd.img ]; then
-  ( cd "$REAL" && gzip -dc /initrd.img | cpio -idmv ) || {
-    echo "failed to unpack initrd.img"; exec sh; }
-else
-  echo "initrd.img missing"; exec sh
-fi
+mount -t tmpfs tmpfs "$REAL" || { echo "tmpfs /real failed"; exec sh; }
 
-# Move our mounts over so /init can see devices and proc/sys
+# unpack embedded initrd into the tmpfs
+( cd "$REAL" && gzip -dc /initrd.img | cpio -idm ) || { echo "unpack failed"; exec sh; }
+
+# bring up core mounts directly in NEW_ROOT
 mkdir -p "$REAL"/{dev,proc,sys}
-mount -o move /dev  "$REAL/dev"  2>/dev/null || true
-mount -o move /proc "$REAL/proc" 2>/dev/null || true
-mount -o move /sys  "$REAL/sys"  2>/dev/null || true
 
-# Hand off to the original init
+# /dev — prefer devtmpfs, fall back to tmpfs + minimal nodes
+mount -t devtmpfs devtmpfs "$REAL/dev" 2>/dev/null || {
+  mount -t tmpfs tmpfs "$REAL/dev" || { echo "dev mount failed"; exec sh; }
+  [ -e "$REAL/dev/console" ] || mknod -m 600 "$REAL/dev/console" c 5 1
+  [ -e "$REAL/dev/null"    ] || mknod -m 666 "$REAL/dev/null"    c 1 3
+  [ -e "$REAL/dev/tty"     ] || mknod -m 666 "$REAL/dev/tty"     c 5 0
+}
+
+# /proc and /sys
+mount -t proc proc "$REAL/proc" || { echo "proc mount failed"; exec sh; }
+mount -t sysfs sys "$REAL/sys"  || { echo "sys mount failed";  exec sh; }
+
+# hand off to the original init (NEW_ROOT must be a mountpoint; it is)
 exec switch_root "$REAL" /init
